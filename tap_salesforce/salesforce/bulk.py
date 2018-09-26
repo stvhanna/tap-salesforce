@@ -1,10 +1,11 @@
 # pylint: disable=protected-access
 import csv
 import json
+import sys
 import time
 import tempfile
 import singer
-import singer.metrics as metrics
+from singer import metrics
 
 import xmltodict
 
@@ -20,17 +21,28 @@ LOGGER = singer.get_logger()
 
 # pylint: disable=inconsistent-return-statements
 def find_parent(stream):
+    parent_stream = stream
     if stream.endswith("CleanInfo"):
-        return stream[:stream.find("CleanInfo")]
+        parent_stream = stream[:stream.find("CleanInfo")]
+    elif stream.endswith("FieldHistory"):
+        parent_stream = stream[:stream.find("FieldHistory")]
     elif stream.endswith("History"):
-        return stream[:stream.find("History")]
+        parent_stream = stream[:stream.find("History")]
+
+    # If the stripped stream ends with "__" we can assume the parent is a custom table
+    if parent_stream.endswith("__"):
+        parent_stream += 'c'
+
+    return parent_stream
 
 
-class Bulk(object):
+class Bulk():
 
     bulk_url = "{}/services/async/41.0/{}"
 
     def __init__(self, sf):
+        # Set csv max reading size to the platform's max size available.
+        csv.field_size_limit(sys.maxsize)
         self.sf = sf
 
     def query(self, catalog_entry, state):
@@ -97,7 +109,7 @@ class Bulk(object):
                 # Add the bulk Job ID and its batches to the state so it can be resumed if necessary
                 tap_stream_id = catalog_entry['tap_stream_id']
                 state = singer.write_bookmark(state, tap_stream_id, 'JobID', job_id)
-                state = singer.write_bookmark(state, tap_stream_id, 'BatchIDs', batch_status['completed'])
+                state = singer.write_bookmark(state, tap_stream_id, 'BatchIDs', batch_status['completed'][:])
 
                 for completed_batch_id in batch_status['completed']:
                     for result in self.get_batch_results(job_id, completed_batch_id, catalog_entry):
@@ -107,8 +119,8 @@ class Bulk(object):
                     LOGGER.info("Finished syncing batch %s. Removing batch from state.", completed_batch_id)
                     LOGGER.info("Batches to go: %d", len(state['bookmarks'][catalog_entry['tap_stream_id']]["BatchIDs"]))
                     singer.write_state(state)
-
-            raise TapSalesforceException(batch_status['stateMessage'])
+            else:
+                raise TapSalesforceException(batch_status['stateMessage'])
         else:
             for result in self.get_batch_results(job_id, batch_id, catalog_entry):
                 yield result
